@@ -24,7 +24,12 @@ import weakref
 
 import kalmanfiltering as km
 import utm
+from lidar_to_ros2 import CarlaLidarPublisher
+import rclpy
+import time
 # import pyproj
+from rclpy.executors import MultiThreadedExecutor
+from threading import Thread
 
 try:
     import pygame
@@ -159,10 +164,11 @@ def get_actor_blueprints(world, filter, generation):
 class World(object):
     """ Class representing the surrounding environment """
 
-    def __init__(self, carla_world, hud, args):
+    def __init__(self, carla_world, hud, args, ros2_publisher):
         """Constructor method"""
         self._args = args
         self.world = carla_world
+        
         try:
             self.map = self.world.get_map()
         except RuntimeError as error:
@@ -177,9 +183,13 @@ class World(object):
         self.gnss_sensor = None
         self.camera_manager = None
         ########
+
         self.imu_sensor = None
-        self.lidar_sensor = None
         self.imu_data_handler = None
+
+        self.lidar_sensor = None
+        self.ros2_publisher = ros2_publisher
+
         ########
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
@@ -245,8 +255,8 @@ class World(object):
         ########
         # self.camera_manager.toggle_recording()
 
-        self.lidar_sensor = CameraManager(self.player, self.hud)
-        self.lidar_sensor.transform_index = cam_lidar_pos
+        self.lidar_sensor = CameraManager(self.player, self.hud, self.ros2_publisher)
+        self.lidar_sensor.transform_index = -1 ## 여기 수정
         self.lidar_sensor.set_sensor(-1, notify=False)
         
         self.imu_sensor = IMUSensor(self.player)
@@ -795,8 +805,11 @@ class GnssSensor(object):
 class CameraManager(object):
     """ Class for camera management"""
 
-    def __init__(self, parent_actor, hud):
+    def __init__(self, parent_actor, hud, ros2Publisher=None):
         """Constructor method"""
+        ###
+        self.ros2_publisher = ros2Publisher
+        ###
         self.sensor = None
         self.surface = None
         self._parent = parent_actor
@@ -806,13 +819,15 @@ class CameraManager(object):
         bound_y = 0.5 + self._parent.bounding_box.extent.y
         bound_z = 0.5 + self._parent.bounding_box.extent.z
         attachment = carla.AttachmentType
+        
         self._camera_transforms = [
             (carla.Transform(carla.Location(x=-2.0*bound_x, y=+0.0*bound_y, z=2.0*bound_z), carla.Rotation(pitch=8.0)), attachment.SpringArmGhost),
             (carla.Transform(carla.Location(x=+0.8*bound_x, y=+0.0*bound_y, z=1.3*bound_z)), attachment.Rigid),
             (carla.Transform(carla.Location(x=+1.9*bound_x, y=+1.0*bound_y, z=1.2*bound_z)), attachment.SpringArmGhost),
             (carla.Transform(carla.Location(x=-2.8*bound_x, y=+0.0*bound_y, z=4.6*bound_z), carla.Rotation(pitch=6.0)), attachment.SpringArmGhost),
             (carla.Transform(carla.Location(x=-1.0, y=-1.0*bound_y, z=0.4*bound_z)), attachment.Rigid),
-            (carla.Transform(carla.Location(0.0,0.0,z=bound_z*2.0)), attachment.Rigid)]
+            (carla.Transform(carla.Location(0.0,0.0,z=bound_z*2.0)), attachment.Rigid),
+            (carla.Transform(carla.Location(x=-0.5,y=0.0,z=1.8)), attachment.Rigid)]
 
         self.transform_index = 1
         self.sensors = [
@@ -823,7 +838,7 @@ class CameraManager(object):
             ['sensor.camera.semantic_segmentation', cc.Raw, 'Camera Semantic Segmentation (Raw)'],
             ['sensor.camera.semantic_segmentation', cc.CityScapesPalette,
              'Camera Semantic Segmentation (CityScapes Palette)'],
-            ['sensor.lidar.ray_cast', None, 'Lidar (Ray-Cast)']]
+            ['sensor.lidar.ray_cast', cc.Raw, 'Lidar (Ray-Cast)']]
         world = self._parent.get_world()
         bp_library = world.get_blueprint_library()
         for item in self.sensors:
@@ -833,7 +848,15 @@ class CameraManager(object):
                 blp.set_attribute('image_size_x', str(hud.dim[0]))
                 blp.set_attribute('image_size_y', str(hud.dim[1]))
             elif item[0].startswith('sensor.lidar'):
-                blp.set_attribute('range', '50')
+                #### lidar attribute setting
+                blp.set_attribute('upper_fov', '15.0')
+                blp.set_attribute('lower_fov', '-25.0')
+                blp.set_attribute('channels', '16')
+                blp.set_attribute('range', '100.0')
+                blp.set_attribute('rotation_frequency', '20')
+                blp.set_attribute('points_per_second', '500000')
+                ####
+                # blp.set_attribute('range', '50')
             item.append(blp)
         self.index = None
 
@@ -885,18 +908,23 @@ class CameraManager(object):
         if not self:
             return
         if self.sensors[self.index][0].startswith('sensor.lidar'):
-            points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
-            points = np.reshape(points, (int(points.shape[0] / 4), 4)) # lidar는 [x,y,z,intensity]로 구성
-            lidar_data = np.array(points[:, :2])
-            lidar_data *= min(self.hud.dim) / 100.0
-            lidar_data += (0.5 * self.hud.dim[0], 0.5 * self.hud.dim[1])
-            lidar_data = np.fabs(lidar_data)  # pylint: disable=assignment-from-no-return
-            lidar_data = lidar_data.astype(np.int32)
-            lidar_data = np.reshape(lidar_data, (-1, 2))
-            lidar_img_size = (self.hud.dim[0], self.hud.dim[1], 3)
-            lidar_img = np.zeros(lidar_img_size)
-            lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
-            self.surface = pygame.surfarray.make_surface(lidar_img)
+            data = np.copy(np.frombuffer(image.raw_data, dtype=np.dtype('f4')))
+            data = np.reshape(data, (int(data.shape[0] / 4), 4))
+            self.ros2_publisher.process_lidar_data(data)
+            # sys.stdout.write(f'\rPublished PointCloud2 data with {(data.shape[0])}points.')
+            # sys.stdout.flush()
+            # points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
+            # points = np.reshape(points, (int(points.shape[0] / 4), 4)) # lidar는 [x,y,z,intensity]로 구성
+            # lidar_data = np.array(points[:, :2])
+            # lidar_data *= min(self.hud.dim) / 100.0
+            # lidar_data += (0.5 * self.hud.dim[0], 0.5 * self.hud.dim[1])
+            # lidar_data = np.fabs(lidar_data)  # pylint: disable=assignment-from-no-return
+            # lidar_data = lidar_data.astype(np.int32)
+            # lidar_data = np.reshape(lidar_data, (-1, 2))
+            # lidar_img_size = (self.hud.dim[0], self.hud.dim[1], 3)
+            # lidar_img = np.zeros(lidar_img_size)
+            # lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
+            # self.surface = pygame.surfarray.make_surface(lidar_img)
         else:
             image.convert(self.sensors[self.index][1])
             array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
@@ -919,7 +947,15 @@ class temp_accel():
         self.z = 0.0
 
 def cal_change(pre_val, cur_val, dt):
+    # if not pre_val:
+    #     print("pre_val is None")
+    # if not cur_val:
+    #     print("cur_val is None")
     return carla.Vector3D((cur_val.x-pre_val.x)/dt, (cur_val.y-pre_val.y)/dt,0.0)
+
+def spin_executor(executor):
+    """스레드에서 spin을 실행하는 함수"""
+    executor.spin()
 
 def game_loop(args):
     """
@@ -941,8 +977,11 @@ def game_loop(args):
         traffic_manager = client.get_trafficmanager()
         sim_world = client.get_world()
 
-        world_time_step = 0.05
+        world_time_step = 0.05 # 0.05
+        original_settings = sim_world.get_settings()
+        args.sync = True
         if args.sync:
+            print("SYNC")
             settings = sim_world.get_settings()
             settings.synchronous_mode = True
             settings.fixed_delta_seconds = world_time_step
@@ -953,14 +992,32 @@ def game_loop(args):
         display = pygame.display.set_mode(
             (args.width, args.height),
             pygame.HWSURFACE | pygame.DOUBLEBUF)
+        
+        ######## Node for ROS2 publisher
+        rclpy.init()
+        channels = 16
+        upper_fov = 15.0
+        lower_fov = -25.0
+        lidar_node = CarlaLidarPublisher(channels, upper_fov-lower_fov, client.get_world())
+        executor = MultiThreadedExecutor()
+        executor.add_node(lidar_node)
+        try:
+            spin_thread = Thread(target=spin_executor, args=(executor,))
+            spin_thread.start()
+        except Exception as e:
+            print(f"Exception in spin thread: {e}")
+
+        print(f"Executor nodes: {executor.get_nodes()}")
+        #################################
+
 
         hud = HUD(args.width, args.height)
-        world = World(client.get_world(), hud, args)
+        world = World(client.get_world(), hud, args, lidar_node)
         controller = KeyboardControl(world)
 
         ##args setting#####
         args.loop = True
-        args.mine = True
+        args.mine = False
         args.agent = "Basic"
         ###################
 
@@ -970,7 +1027,8 @@ def game_loop(args):
         player_transform = Transform_data(player_point.location.x,player_point.location.y,player_point.rotation.yaw)
         world.set_player_trans(player_transform)
         pre_imu_data = (0.0, temp_accel()) # t-1시점의 (yaw,a)
-        pre_gnss_data = world.gnss_sensor.get_val() # t-1시점의 (x,y,z)
+        # pre_gnss_data = world.gnss_sensor.get_val() # t-1시점의 (x,y,z)
+        pre_gnss_data = carla.Location(x=player_point.location.x,y=player_point.location.y,z=0.0)
         if args.mine:
             km_filter = km.KFilter(player_transform.x,player_transform.y,vx=0.0,vy=0.0,ax=0.0,ay=0.0,delta=0.0,
                             dt=0.0)
@@ -983,9 +1041,9 @@ def game_loop(args):
         pre_pos = player_point.location
         # pre_gnss_data = world.gnss_sensor.get_val()
         
-
         #################################################
 
+        
         target_speed = 30
         if args.agent == "Basic":
             agent = BasicAgent(world.player, target_speed, player_transform)
@@ -1100,12 +1158,16 @@ def game_loop(args):
     finally:
 
         if world is not None:
-            settings = world.world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            world.world.apply_settings(settings)
+            # settings = world.world.get_settings()
+            # settings.synchronous_mode = False
+            # settings.fixed_delta_seconds = None
+            world.world.apply_settings(original_settings)
             traffic_manager.set_synchronous_mode(True)
-
+            ####################
+            if rclpy.ok():  # ROS2 노드가 살아 있는지 확인 후 shutdown
+                rclpy.shutdown()
+            lidar_node.destroy_node()
+            ####################
             world.destroy()
 
         pygame.quit()
