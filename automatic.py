@@ -24,7 +24,7 @@ import weakref
 
 import kalmanfiltering as km
 import utm
-from lidar_to_ros2 import CarlaLidarPublisher
+from lidar_to_ros2 import CarlaLidarPublisher, CarlaOdometryPublisher
 import rclpy
 import time
 # import pyproj
@@ -93,7 +93,7 @@ class Transform_data():
         self.y = y
         self.location = carla.Location(x,y,z=0.0)
         self.yaw = yaw # radians
-        self.radian_yaw = math.degrees(yaw)
+        self.degree_yaw = math.degrees(yaw)
         self.head_vector = self.yaw2headvec() # [x_dir,y_dir,z_dir]
         self.v = carla.Vector3D(vx,vy,0.0)
         self.steering = steering
@@ -403,7 +403,7 @@ class HUD(object):
         
         gnss_location = world.gnss_sensor.get_val()
         estimated_xy = [world._player_transform.x, world._player_transform.y]
-        estimated_yaw = [world._player_transform.yaw, world._player_transform.radian_yaw]
+        estimated_yaw = [world._player_transform.yaw, world._player_transform.degree_yaw]
         self._info_text = [
             'Server:  % 16.0f FPS' % self.server_fps,
             'Client:  % 16.0f FPS' % clock.get_fps(),
@@ -657,6 +657,7 @@ class IMUSensor(object):
         self._parent = parent_actor
         self.yaw = None
         self.accel = None
+        self.imu_full_data = None
         world = self._parent.get_world()
         bp = world.get_blueprint_library().find('sensor.other.imu')
         # try:
@@ -675,12 +676,19 @@ class IMUSensor(object):
     def get_val(self):
         return self.yaw, self.accel
     
+    def get_odometry_data(self):
+        orientation = self.imu_full_data.transform.rotation
+        ang_vel = self.imu_full_data.gyroscope
+        return math.radians(orientation.yaw),math.radians(orientation.pitch),math.radians(orientation.roll),ang_vel.x,ang_vel.y,ang_vel.z
+    
     @staticmethod
     def imu_callback(weak_self, imu_data):
         self = weak_self()
         if not self:
             return
         
+        self.imu_full_data = imu_data
+
         orientation = imu_data.transform.rotation # degree로 제공된다
         self.yaw = math.radians(orientation.yaw) # degree to radian
 
@@ -1001,13 +1009,25 @@ def game_loop(args):
         lidar_node = CarlaLidarPublisher(channels, upper_fov-lower_fov, client.get_world())
         executor = MultiThreadedExecutor()
         executor.add_node(lidar_node)
+        # try:
+        #     spin_thread = Thread(target=spin_executor, args=(executor,))
+        #     spin_thread.start()
+        # except Exception as e:
+        #     print(f"Exception in spin thread: {e}")
+
+        # print(f"Executor nodes: {executor.get_nodes()}")
+    
+        ######## Node for KM filter estimated value #####
+        odometry_node = CarlaOdometryPublisher(client.get_world())
+        executor.add_node(odometry_node)
         try:
             spin_thread = Thread(target=spin_executor, args=(executor,))
             spin_thread.start()
         except Exception as e:
             print(f"Exception in spin thread: {e}")
 
-        print(f"Executor nodes: {executor.get_nodes()}")
+        # print(f"Executor nodes: {executor.get_nodes()}")
+
         #################################
 
 
@@ -1017,7 +1037,7 @@ def game_loop(args):
 
         ##args setting#####
         args.loop = True
-        args.mine = False
+        args.mine = True
         args.agent = "Basic"
         ###################
 
@@ -1044,7 +1064,7 @@ def game_loop(args):
         #################################################
 
         
-        target_speed = 30
+        target_speed = 25
         if args.agent == "Basic":
             agent = BasicAgent(world.player, target_speed, player_transform)
             agent.follow_speed_limits(False)
@@ -1063,10 +1083,11 @@ def game_loop(args):
         # destination = random.choice(spawn_points).location
         des_index = 30
         destination = spawn_points[des_index].location
-        if args.mine:
-            agent.my_set_destination(destination)
-        else:
-            agent.set_destination(destination)
+        agent.set_destination(destination)
+        # if args.mine:
+        #     agent.my_set_destination(destination)
+        # else:
+        #     agent.set_destination(destination)
 
         clock = pygame.time.Clock()
 
@@ -1089,10 +1110,11 @@ def game_loop(args):
                 if args.loop:
                     des_index = (des_index+10) % len(spawn_points)
                     destination = spawn_points[des_index].location
-                    if args.mine:
-                        agent.my_set_destination(destination)
-                    else:
-                        agent.set_destination(destination)
+                    agent.set_destination(destination)
+                    # if args.mine:
+                    #     agent.my_set_destination(destination)
+                    # else:
+                    #     agent.set_destination(destination)
                     world.hud.notification("Target reached", seconds=4.0)
                     print("The target has been reached, searching for another target")
                 else:
@@ -1130,27 +1152,41 @@ def game_loop(args):
                 control = agent.run_step()
                 control.manual_gear_shift = False
                 world.player.apply_control(control)
+                u = np.array([control.throttle,control.brake,control.steer])
+                # print(f'현재 진짜 steer:{world.player.get_control().steer}, 입력 steering:{u[2]}')
+
             else:
+                ####
+                x, y, vx, vy, ax, ay, delta = km_filter.get_state() # 이전상태
+                km_filter.set_dt(dt)
+                player_transform.set_val(x,y,pre_imu_data[0],vx,vy,delta)
+
                 # 제어 입력 계산
                 control = agent.my_run_step()
                 control.manual_gear_shift = False
                 world.player.apply_control(control)
                 u = np.array([control.throttle,control.brake,control.steer])
 
-                ####
-                x, y, vx, vy, ax, ay, delta = km_filter.get_state()
-                km_filter.set_dt(dt)
-                player_transform.set_val(x,y,pre_imu_data[0],vx,vy,delta)
                 # print(f'현재 진짜 steer:{world.player.get_control().steer}, 현재 예측 steer:{delta}, 차이:{world.player.get_control().steer-delta}, 입력 steering:{u[2]}')
                 # print(f'현재 진짜 steer:{world.player.get_control().steer}, 입력 steering:{u[2]}, 현재와 입력 차이:{world.player.get_control().steer-delta}')
+
                 # 칼만 필터에 넣어줄 데이터 정리
                 cur_gnss_data = world.gnss_sensor.get_val() # (x,y,z)
                 gnss_vel = cal_change(pre_gnss_data,cur_gnss_data,dt)
                 z = np.array([cur_gnss_data.x,cur_gnss_data.y,gnss_vel.x,gnss_vel.y]) # [x,y,vx,vy]
                 imu_asInput = np.array([pre_imu_data[1].x,pre_imu_data[1].y])
+                
                 # Predict
-                km_filter.predict_and_update(u,imu_asInput,z)
+                km_filter.predict_and_update(u,imu_asInput,z) # 현재상태
+
+                # make data for odometry of LeGO-LOAM
+                x, y, vx, vy, _, _, _ = km_filter.get_state()
+                yaw,pitch,roll,wx,wy,wz = world.imu_sensor.get_odometry_data()
+                odom_data = np.array([[x,y,0.0],[roll,pitch,yaw],[vx,vy,0.0],[wx,wy,wz]])
+                odometry_node.process_odometry_data(odom_data)
+
                 # print(f'진짜 속도:{cur_true_vel},GNSS기반 속도:{gnss_vel},현재 칼만필터의 예측 속도:{km_filter.kf.x[2]},{km_filter.kf.x[3]}\n#####################################')
+
                 # Get imu, gnss data for next step
                 pre_imu_data = world.imu_sensor.get_val() # (yaw, accel)
                 pre_gnss_data = cur_gnss_data

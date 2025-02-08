@@ -248,7 +248,6 @@ class LocalPlanner(object):
 
         num_waypoint_removed = 0
         for waypoint, _ in self._waypoints_queue:
-
             if len(self._waypoints_queue) - num_waypoint_removed == 1:
                 min_distance = 1  # Don't remove the last waypoint until very close by
             else:
@@ -257,10 +256,14 @@ class LocalPlanner(object):
                 num_waypoint_removed += 1
             else:
                 break
-
+        
+        # num_waypoint_removed가 순식간에 여러개 사라지는 이슈 확인 -> 1개만 popleft()
+        # print(f'num_waypoint_removed: {num_waypoint_removed}')
+        # if num_waypoint_removed > 0:
+        #     for _ in range(num_waypoint_removed):
+        #         self._waypoints_queue.popleft()
         if num_waypoint_removed > 0:
-            for _ in range(num_waypoint_removed):
-                self._waypoints_queue.popleft()
+            self._waypoints_queue.popleft()
 
         # Get the target waypoint and move using the PID controllers. Stop if no target waypoint
         if len(self._waypoints_queue) == 0:
@@ -271,6 +274,7 @@ class LocalPlanner(object):
             control.hand_brake = False
             control.manual_gear_shift = False
         else:
+            # print(f'waypoints_queue size: {len(self._waypoints_queue)}')
             self.target_waypoint, self.target_road_option = self._waypoints_queue[0]
             control = self._vehicle_controller.my_run_step(self._target_speed, self.target_waypoint)
 
@@ -297,7 +301,7 @@ class LocalPlanner(object):
 
         # Purge the queue of obsolete waypoints
         veh_location = self._vehicle.get_location()
-        vehicle_speed = get_speed(self._vehicle) / 3.6 # m/s 단위를 km/h로 바꾼거임
+        vehicle_speed = get_speed(self._vehicle) / 3.6 # km/h 단위를 m/s로 바꾼거임
         self._min_distance = self._base_min_distance + self._distance_ratio * vehicle_speed
 
         num_waypoint_removed = 0

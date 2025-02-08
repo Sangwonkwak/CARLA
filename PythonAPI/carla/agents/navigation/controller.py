@@ -317,6 +317,8 @@ class PIDLateralController():
                           w_loc.y - ego_loc.y,
                           0.0])
 
+        # print(f'차량헤드방향:{v_vec}, 다음목표방향:{w_vec}, 다음목표위치: {w_loc}') # 현재 문제는 w_loc가 순차적으로 증가하는게 아니라 한번씩 점핑되는 현상이 있음
+
         wv_linalg = np.linalg.norm(w_vec) * np.linalg.norm(v_vec)
         if wv_linalg == 0:
             _dot = 1

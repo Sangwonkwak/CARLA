@@ -12,6 +12,9 @@ import struct
 from std_msgs.msg import Header
 import ros_compatibility as roscomp
 from collections import deque
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovariance, TwistWithCovariance, Quaternion
+import transforms3d.euler as euler
 
 _DATATYPES = {}
 _DATATYPES[PointField.INT8] = ('b', 1)
@@ -44,8 +47,8 @@ class CarlaLidarPublisher(Node):
 
     # lidar의 콜백으로 일단 데이터 저장만 해둔다.
     def process_lidar_data(self, data):
-        sys.stdout.write(f'\rReceived PointCloud2 data with {(data.shape[0])}points.')
-        sys.stdout.flush()
+        # sys.stdout.write(f'\rReceived PointCloud2 data with {(data.shape[0])}points.')
+        # sys.stdout.flush()
         self.latest_lidar_data.append(data)
         # print("Received data")
         
@@ -218,3 +221,69 @@ def get_msg_header(frame_id=None, timestamp=None):
 
 # if __name__ == '__main__':
 #     main()
+
+class CarlaOdometryPublisher(Node):
+    def __init__(self, world=None):
+        super().__init__('carla_odometry_publisher')
+        self.publisher = self.create_publisher(Odometry, '/carla_odometry', 1)
+        self.world = world
+
+        # 퍼블리싱 주기 세팅
+        self.publish_rate = 0.1 # 10hz
+        self.latest_odometry_data = deque(maxlen=2000)
+        self.timer = self.create_timer(self.publish_rate, self.publish_odometry_data)
+        print("Timer created")
+
+    # odometry의 콜백으로 일단 데이터 저장만 해둔다. data는 [x,y,z],[yaw,pitch,roll],[vx,vy,vz],[wx,wy,wz]의 4*3 행렬
+    def process_odometry_data(self, data):
+        sys.stdout.write(f'\rReceived Odometry data')
+        sys.stdout.flush()
+        self.latest_odometry_data.append(data)
+        # print("Received data")
+        
+    def publish_odometry_data(self):
+        try:
+            # print("Publishing Lidar Data...")
+            if not self.latest_odometry_data:
+                print("No data to publish.")
+                return
+            data = self.latest_odometry_data.popleft()
+            odometry_msg = CarlaOdometryPublisher.create_odometry_msg(data, self.world)
+            self.publisher.publish(odometry_msg)
+        except Exception as e:
+            print(f"Error in publish_lidar_data: {e}")
+
+    @staticmethod
+    def create_odometry_msg(data, world):
+        """Convert numpy array to ROS2 PointCloud2 message."""
+        snapshot = world.get_snapshot()
+        carla_time = snapshot.timestamp.elapsed_seconds  # CARLA 시뮬레이션 시간
+        
+        odom_msg = Odometry()
+        odom_msg.header = get_msg_header(frame_id = "velodyne", timestamp=carla_time)
+        odom_msg.child_frame_id = "velodyne"
+
+        # x,y,z 위치
+        odom_msg.pose.pose.position.x = data[0][0]
+        odom_msg.pose.pose.position.y = data[0][1] * -1
+        odom_msg.pose.pose.position.z = data[0][2]
+
+        # Quaternion
+        quaternion = euler.euler2quat(data[1][0], data[1][1], data[1][2])
+        odom_msg.pose.pose.orientation = Quaternion(
+            x=quaternion[1],y=quaternion[2],z=quaternion[3],w=quaternion[0]
+        )
+        # odom_msg.pose.covariance = []
+
+        # linear velocity
+        odom_msg.twist.twist.linear.x = data[2][0]
+        odom_msg.twist.twist.linear.y = data[2][1]
+        odom_msg.twist.twist.linear.z = data[2][2]
+
+        # angular velocity
+        odom_msg.twist.twist.angular.x = data[3][0]
+        odom_msg.twist.twist.angular.y = data[3][1]
+        odom_msg.twist.twist.angular.z = data[3][2]
+        # odom_msg.twist.covariance = []
+
+        return odom_msg

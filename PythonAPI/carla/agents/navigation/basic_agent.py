@@ -185,6 +185,10 @@ class BasicAgent(object):
         end_waypoint = self._map.get_waypoint(end_location)
 
         route_trace = self.trace_route(start_waypoint, end_waypoint)
+        # print(f'waypoint queue original size: {len(route_trace)}')
+        # for i in range(10):
+        #     print(route_trace[i][0].transform.location) # 추가
+        # print(f'route_trace: {route_trace}')
         self._local_planner.set_global_plan(route_trace, clean_queue=clean_queue)
 
     def set_global_plan(self, plan, stop_waypoint_creation=True, clean_queue=True):
