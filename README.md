@@ -8,7 +8,8 @@
 
 ## LeGO-LOAM 모듈 실행
 ```bash
-cd /etc```
+cd /etc
+```
 ## CARLA 서버 실행
 
 ## CARLA 클라이언트 실행
