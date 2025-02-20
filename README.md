@@ -11,5 +11,10 @@
 cd /etc
 ```
 ## CARLA 서버 실행
-
+```bash
+cd /etc
+```
 ## CARLA 클라이언트 실행
+```bash
+cd /etc
+```
