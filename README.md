@@ -12,7 +12,7 @@ ros2 launch lego_loam_sr run.launch.py
 ```
 
 ## CARLA 서버 실행
-- First, Locate **CARLA** directory in carla0.9.14
+- First, locate **CARLA** directory in carla0.9.14
 ```bash
 cd carla0.9.14
 ./CarlaUE4.sh -quality-level=Low
