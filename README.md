@@ -7,7 +7,8 @@
 | Python    | 3.8   |
 
 ## LeGO-LOAM 모듈 실행
-'''cd /etc '''
+'''bash
+cd /etc 
 ## CARLA 서버 실행
 
 ## CARLA 클라이언트 실행
